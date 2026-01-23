@@ -1,6 +1,6 @@
 CURRENT BUGS IDENTIFIED (yet to fix):
 
-when a lower node is started after host promotion (for example, 5 was started first, then 6 was started, which was automatically promoted to host by bully algo and later 2 was started), the song queue list when added by the smaller nodes (5 or 6) is being persisted by the smaller follower nodes but is not reflected in the host node, the host node has only the previous history of added songs. secondly, the song being currently played is shown as "EMPTY" in the follower nodes, while the host node shows it correct.
+when a lower node is started after host promotion (for example, 5 was started first, then 6 was started, which was automatically promoted to host by bully algo and later 2 was started), the song queue list when added by the smaller nodes (5 or 2) is being persisted by the smaller follower nodes but is not reflected in the host node, the host node has only the previous history of added songs. secondly, the song being currently played is shown as "EMPTY" in the follower nodes, while the host node shows the current song being played with no issues.
 
 
 
