@@ -19,12 +19,12 @@ class StateManager:
         # Message buffer for causal ordering
         # Stores messages that arrived too early (waiting for dependencies)
         self.pending_messages: List[Message] = []
-        
-        # Playback state (set by main.py)
-        self.current_song = None
-        self.current_song_pos = 0
+
+        self.uptime = 0
         
         self.lock = threading.Lock()
+
+        self.host_id = None
 
     def log(self, text):
         if self.logger: self.logger(f"[State] {text}")
@@ -66,25 +66,32 @@ class StateManager:
             self.peers[node_id] = {'ip': ip, 'port': port, 'status': 'alive'}
             if node_id not in self.vector_clock:
                 self.vector_clock[node_id] = 0
+        self.log(f"Updated peer list: {self.peers}")
 
     def add_song(self, song: Song):
         with self.lock:
-            # Check if song already exists
-            for existing_song in self.playlist:
-                if existing_song.id == song.id:
-                    return False  # Song already exists
-            
             self.playlist.append(song)
             self.log(f"Added to queue: {song.title} by {song.artist}")
             return True
-    
-    def clear_playlist(self):
-        """Clear the entire playlist."""
+        
+    def update_uptime(self, seconds):
         with self.lock:
-            self.playlist.clear()
-            self.log("Playlist cleared")
-    
-    def get_playlist_copy(self):
-        """Get a copy of the playlist for synchronization."""
+            self.uptime = seconds
+
+    def get_uptime(self):
         with self.lock:
-            return self.playlist.copy()
+            return self.uptime
+
+    def set_host(self, node_id):
+        with self.lock:
+            self.host_id = node_id
+            self.log(f"Set host to: {self.host_id}")
+
+    def get_host(self):
+        with self.lock:
+            return self.host_id
+        
+    def is_host(self, node_id):
+        with self.lock:
+            self.log(f"Checking if {node_id} is host: {self.host_id}")
+            return self.host_id == node_id

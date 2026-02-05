@@ -7,8 +7,6 @@ class AudioEngine:
     def __init__(self, logger_callback=None):
         self.logger = logger_callback
         self.is_playing = False
-        self.start_offset = 0  # Track the offset we started playing from
-        self.playback_start_time = 0  # Track when playback started
         
         try:
             pygame.mixer.init()
@@ -29,14 +27,9 @@ class AudioEngine:
 
         try:
             pygame.mixer.music.load(song_path)
-            # Store the start offset
-            self.start_offset = start_time
-            self.playback_start_time = pygame.time.get_ticks()
-            
-            # Play from the specified start time
+            # pygame.mixer.music.play(loops, start_time_in_seconds)
             pygame.mixer.music.play(start=start_time)
             self.is_playing = True
-            
             if start_time > 0:
                 self.log(f"Resuming: {os.path.basename(song_path)} at {start_time:.1f}s")
             else:
@@ -47,13 +40,10 @@ class AudioEngine:
             return False
 
     def get_current_pos(self):
-        """Returns the current absolute playback position in seconds."""
+        """Returns the current playback position in seconds."""
         if self.is_busy():
-            # pygame.mixer.music.get_pos() returns milliseconds since play() was called
-            # We need to add the start offset to get absolute position
-            elapsed_ms = pygame.mixer.music.get_pos()
-            elapsed_seconds = elapsed_ms / 1000.0
-            return self.start_offset + elapsed_seconds
+            # get_pos() returns milliseconds since play() was called
+            return pygame.mixer.music.get_pos() / 1000.0
         return 0
 
     def set_volume(self, volume):
@@ -72,4 +62,3 @@ class AudioEngine:
     def stop(self):
         pygame.mixer.music.stop()
         self.is_playing = False
-        self.start_offset = 0
