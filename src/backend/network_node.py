@@ -9,8 +9,8 @@ from src.utils.models import Message
 
 class NetworkNode:
     """
-    Handles TCP connections and message routing. 
-    Updated to support Playback Control and Full State Syncs.
+    Handles TCP connections and message routing.
+    Updated: FULL_STATE_SYNC now includes peer data for persistence restoration.
     """
     
     def __init__(self, node_id, state_manager, logger_callback=None):
@@ -22,6 +22,7 @@ class NetworkNode:
         self.election = None
         self.audio = None 
         self.connections: Dict[str, socket.socket] = {}
+        self.has_restored_persistence = False # Track if we have synced history
         
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -85,7 +86,11 @@ class NetworkNode:
         except Exception:
             pass      
         finally:
-            if peer_id in self.connections: self.connections.pop(peer_id)
+            if peer_id in self.connections: 
+                self.connections.pop(peer_id)
+            if peer_id:
+                # Mark offline instead of deleting to persist data
+                self.state.mark_peer_offline(peer_id)
             conn.close()
 
     def connect_to_peer(self, node_id, ip, port):
@@ -99,10 +104,9 @@ class NetworkNode:
             self.connections[node_id] = s
             self.state.update_peer(node_id, ip, port)
 
-            if self.state.is_host(self.node_id):
-                self.send_to_peer(node_id, 'WELCOME', payload={'id': self.node_id})
-
+            # Send HELLO. If we are new, this triggers WELCOME/Sync from Host.
             self.send_to_peer(node_id, 'HELLO', payload={'id': self.node_id})
+            
             threading.Thread(target=self._handle_client, args=(s, (ip, port)), daemon=True).start()
         except Exception:
             pass
@@ -110,7 +114,6 @@ class NetworkNode:
     def send_to_peer(self, node_id, msg_type, payload=None):
         if node_id not in self.connections: return
         clock = self.state.vector_clock.copy()
-        # Increment clock for state-changing messages
         if msg_type in ['QUEUE_SYNC', 'FULL_STATE_SYNC', 'REMOVE_SONG', 'PLAYBACK_CONTROL']:
             clock = self.state.increment_clock()
         msg = Message(self.node_id, self.ip, msg_type, payload, clock)
@@ -134,31 +137,101 @@ class NetworkNode:
 
     def _handle_logic(self, msg: Message):
         m_type = msg.msg_type
+        sender = msg.sender_id
         
-        if m_type == 'WELCOME': 
-            self.state.set_host(msg.sender_id)
-        elif m_type == 'HEARTBEAT' and self.election:
-            self.election.on_heartbeat_received()
-        elif m_type == 'HELLO':
-            self.state.update_peer(msg.sender_id, msg.sender_ip, self.port)
-            if not self.state.get_host() or self.state.is_host(msg.sender_id):
-                self.send_to_peer(msg.sender_id, 'REQUEST_STATE')
-        
+        if m_type == 'HELLO':
+            self.state.update_peer(sender, msg.sender_ip, self.port)
+            # If we are host, welcome them and trigger state sync
+            if self.state.is_host(self.node_id) or not self.state.get_host():
+                self.send_to_peer(sender, 'WELCOME', payload={'host_id': self.node_id})
+                # Auto-send state so they get persistence data immediately
+                self.send_to_peer(sender, 'FULL_STATE_SYNC', payload={
+                    'playlist': self.state.playlist,
+                    'current_song': getattr(self.state, 'current_song', None),
+                    'peers': self.state.peers # SEND PEER DATA FOR PERSISTENCE
+                })
+
+        elif m_type == 'WELCOME':
+            hid = msg.payload.get('host_id')
+            if hid: self.state.set_host(hid)
+            # Request state just in case, though HELLO usually triggers it
+            self.send_to_peer(sender, 'REQUEST_STATE')
+
+        elif m_type == 'HEARTBEAT':
+            up = msg.payload.get('uptime', 0)
+            bat = msg.payload.get('battery', 100)
+            
+            # PERSISTENCE PROTECTION:
+            # If the incoming heartbeat reports a LOWER uptime than we remember,
+            # it means the node crashed and restarted.
+            # We should NOT overwrite our high value with their low value yet.
+            # Instead, we should trigger a Sync to help them restore their value.
+            
+            known_uptime = 0
+            if sender in self.state.peers:
+                known_uptime = self.state.peers[sender].get('uptime', 0)
+            
+            # Allow some drift, but if incoming is significantly less (restart case)
+            if up < known_uptime - 10.0:
+                # Keep our known high uptime (increment slightly to simulate passage of time)
+                # We do NOT accept the reset to 0
+                self.state.update_peer_heartbeat(sender, known_uptime + 1.0, bat) 
+                
+                # Send them the state so they can fix themselves
+                # Only Host should do this to prevent message storms
+                if self.state.is_host(self.node_id):
+                    self.send_to_peer(sender, 'FULL_STATE_SYNC', payload={
+                        'playlist': self.state.playlist,
+                        'current_song': getattr(self.state, 'current_song', None),
+                        'peers': self.state.peers 
+                    })
+                    self.log(f"Detected restart of {sender} (new={up:.1f} < old={known_uptime:.1f}). Sent Restore Sync.")
+            else:
+                # Normal update
+                self.state.update_peer_heartbeat(sender, up, bat)
+
+            if self.election:
+                self.election.on_heartbeat_received()
+
         elif m_type == 'REQUEST_STATE':
-            self.send_to_peer(msg.sender_id, 'FULL_STATE_SYNC', payload={
+            self.send_to_peer(sender, 'FULL_STATE_SYNC', payload={
                 'playlist': self.state.playlist,
-                'current_song': getattr(self.state, 'current_song', None)
+                'current_song': getattr(self.state, 'current_song', None),
+                'peers': self.state.peers # SEND PEER DATA
             })
 
         elif m_type == 'FULL_STATE_SYNC':
-            # Replaces entire playlist (Good for Shuffle/Clear/Initial Sync)
             self.state.playlist = msg.payload.get('playlist', [])
             self.state.current_song = msg.payload.get('current_song')
-            self.log(f"Full state synced. {len(self.state.playlist)} songs in queue.")
+            
+            # PERSISTENCE RESTORATION LOGIC:
+            # Look for our own ID in the incoming peer list (which comes from the Host).
+            # If the Host has a record of us with a higher uptime than our current local session,
+            # it means we crashed/restarted and the Host "remembers" us.
+            # We adopt that memory to continue our uptime score seamlessly.
+            incoming_peers = msg.payload.get('peers', {})
+            
+            if self.node_id in incoming_peers:
+                remote_uptime = incoming_peers[self.node_id].get('uptime', 0)
+                local_uptime = self.state.get_uptime()
+                
+                # If remote memory is significantly larger than our fresh start, adopt it.
+                if remote_uptime > local_uptime:
+                    self.state.set_restored_uptime(remote_uptime)
+                    self.log(f"PERSISTENCE RESTORED: Adopted uptime {remote_uptime:.1f}s from Host.")
+            
+            # Merge other peers (optional, good for mesh knowledge)
+            for pid, pdata in incoming_peers.items():
+                if pid != self.node_id and pid not in self.state.peers:
+                    self.state.peers[pid] = pdata
+
+            self.log(f"Full state synced. {len(self.state.playlist)} songs.")
 
         elif m_type in ['ELECTION', 'ANSWER', 'COORDINATOR'] and self.election:
-            if m_type == 'ELECTION': self.election.on_election_received(msg.sender_id, msg.payload.get('uptime'))
-            elif m_type == 'ANSWER': self.election.on_answer_received()
+            if m_type == 'ELECTION': 
+                self.election.on_election_received(sender, msg.payload.get('score', 0))
+            elif m_type == 'ANSWER': 
+                self.election.on_answer_received()
             elif m_type == 'COORDINATOR': 
                 self.election.on_coordinator_received(msg.payload['leader_id'])
                 if msg.payload['leader_id'] != self.node_id and self.audio: self.audio.stop()
@@ -169,7 +242,6 @@ class NetworkNode:
                 with self.state.lock:
                     if not any(s.id == song.id for s in self.state.playlist):
                         self.state.playlist.append(song)
-                        self.log(f"Queue updated: {song.title}")
 
         elif m_type == 'REMOVE_SONG':
             sid = msg.payload.get('song_id')
@@ -179,22 +251,17 @@ class NetworkNode:
             song_obj = msg.payload.get('song')
             self.state.current_song = song_obj
             if song_obj:
-                # Remove from queue if it was there
                 self.state.playlist = [s for s in self.state.playlist if s.id != song_obj.id]
         
         elif m_type == 'PLAYBACK_SYNC':
             self.state.current_song_pos = msg.payload.get('pos', 0)
-            # Fix: Update duration in state so UI seekbar can sync
             if 'dur' in msg.payload:
                 self.state.current_duration = msg.payload['dur']
 
         elif m_type == 'PLAYBACK_CONTROL':
             action = msg.payload.get('action')
-            # Listeners don't actually play audio, but we update UI state if needed
-            if action == 'pause':
-                self.log("Host paused playback")
-            elif action == 'resume':
-                self.log("Host resumed playback")
+            if action == 'pause': self.log("Host paused playback")
+            elif action == 'resume': self.log("Host resumed playback")
 
     def _check_buffer(self):
         changed = True

@@ -2,22 +2,25 @@ import threading
 import time
 from src.utils.config import ELECTION_TIMEOUT, HOST_TIMEOUT
 
-# TODO Handle heartbeat/battery based host assignment
 class ElectionManager:
-    """Implements the Bully Algorithm for Leader Election."""
+    """
+    Custom Score-Based Election (Modified Bully).
+    Score = Uptime * BatteryPenalty.
+    Higher score wins.
+    """
     
-    def __init__(self, node_id, state, network_node, logger_callback=None):
+    def __init__(self, node_id, state, network_node, logger_callback=None, battery_callback=None):
         self.node_id = node_id
         self.network = network_node
         self.logger = logger_callback
         self.state = state
+        self.get_battery = battery_callback # Function to get current battery
         
         self.leader_id = None
         self.is_election_running = False
         self.received_answer = False
         
-        self.init_time = time.time()
-        self.last_heartbeat = self.init_time
+        self.last_heartbeat = time.time()
         self.is_host = False
         
         self.lock = threading.RLock()
@@ -25,93 +28,110 @@ class ElectionManager:
     def log(self, text):
         if self.logger: self.logger(f"[Election] {text}")
 
+    def calculate_my_score(self):
+        """
+        Logic: Uptime is the base score.
+        Battery < 20% -> 50% Penalty
+        Battery < 50% -> 20% Penalty
+        """
+        uptime = self.state.get_uptime()
+        battery = self.get_battery() if self.get_battery else 100
+        
+        penalty = 0.0
+        if battery < 20:
+            penalty = 0.5
+        elif battery < 50:
+            penalty = 0.2
+            
+        score = uptime * (1.0 - penalty)
+        return score
+
     def start_election(self):
-        """Initiates an election by notifying all higher-ID nodes."""
+        """Broadcasts ELECTION message with MY SCORE to all alive peers."""
         with self.lock:
-            self.leader_id = self.state.get_host()
-            self.log(self.state.peers)
-            self.log(f"Starting election. My ID: {self.node_id}")
             self.is_election_running = True
             self.received_answer = False
             
-        higher_nodes = [pid for pid in self.network.state.peers.keys() if pid > self.node_id]
-        
-        if not higher_nodes:
-            # I am the highest ID node
-            self.declare_victory()
-        else:
-            for pid in higher_nodes:
-                payload={
-                    'uptime': self.state.get_uptime()
-                }
-                self.network.send_to_peer(pid, 'ELECTION', payload=payload)
+            my_score = self.calculate_my_score()
+            self.log(f"Starting Election. My Score: {my_score:.1f} (Up: {self.state.get_uptime():.0f}s, Bat: {self.get_battery()}%)")
             
-            # Wait for ANSWER messages
-            threading.Timer(ELECTION_TIMEOUT, self._check_election_results).start()
+            # Send to ALL alive peers (not just higher IDs, because ID doesn't matter now)
+            alive_peers = self.state.get_alive_peers_ids()
+            
+            if not alive_peers:
+                # No peers? I win.
+                self._declare_victory()
+                return
 
-    def _check_election_results(self):
-        """Checks if any higher-ID node responded during the timeout."""
-        with self.lock:
-            self.log("Election timeout reached.")
-            if not self.received_answer and self.is_election_running:
-                self.declare_victory()
-            self.is_election_running = False
+            for pid in alive_peers:
+                self.network.send_to_peer(pid, 'ELECTION', payload={'score': my_score})
+            
+            # Wait for answers
+            threading.Timer(ELECTION_TIMEOUT, self._check_election_result).start()
 
-    def on_election_received(self, sender_id, sender_uptime):
-        # Use composite metric: primary = uptime, secondary = node ID
-        my_metric = (self.state.get_uptime(), self.node_id)
-        sender_metric = (sender_uptime, sender_id)
-        self.log(f"Election received from {sender_id}. My metric: {my_metric}, Sender metric: {sender_metric}")
-        if sender_metric < my_metric:
+    def on_election_received(self, sender_id, sender_score):
+        """
+        If my score is HIGHER than sender's, I bully them (send ANSWER) and take over.
+        """
+        my_score = self.calculate_my_score()
+        
+        if my_score > sender_score:
+            # I am better. Veto.
             self.network.send_to_peer(sender_id, 'ANSWER')
-            self.log(f"Sent ANSWER to {sender_id}")
-            # Start own election to propagate
+            # Ensure I am running for election too
             if not self.is_election_running:
                 self.start_election()
+        else:
+            # They are better. I yield.
+            pass
 
     def on_answer_received(self):
-        """Called when a higher-ID node acknowledges it is taking over."""
+        """Someone with a better score responded. I step down."""
         with self.lock:
             self.received_answer = True
-            self.log("Higher-ID node answered. Waiting for coordinator...")
+            # self.log("Received ANSWER (Higher score exists). Waiting for Coordinator msg.")
 
-    def declare_victory(self):
-        """Declares self as the new Leader/Host."""
+    def _check_election_result(self):
+        """Called after timeout. If no one better answered, I win."""
+        with self.lock:
+            if self.is_election_running and not self.received_answer:
+                self._declare_victory()
+
+    def _declare_victory(self):
         with self.lock:
             self.is_host = True
             self.leader_id = self.node_id
             self.state.set_host(self.node_id)
-            self.log("I am the new Host!")
-        
-        # Notify everyone
-        for pid in self.network.connections.keys():
-            self.network.send_to_peer(pid, 'COORDINATOR', payload={'leader_id': self.node_id})
+            self.is_election_running = False
+            self.log(f"I won! Score: {self.calculate_my_score():.1f}")
+            
+            # Announce to all (even offline ones in case they wake up? No, just alive)
+            for pid in self.network.connections.keys():
+                self.network.send_to_peer(pid, 'COORDINATOR', payload={'leader_id': self.node_id})
 
     def on_coordinator_received(self, leader_id):
-        """Updated when a new coordinator is announced."""
         with self.lock:
             self.leader_id = leader_id
             self.state.set_host(leader_id)
             self.is_host = (leader_id == self.node_id)
             self.is_election_running = False
-            self.update_heartbeat()
+            self.update_heartbeat() # Reset timeout logic
             self.log(f"New Host: {leader_id}")
 
     def on_heartbeat_received(self):
-        """Resets the failure detection timer."""
         self.update_heartbeat()
 
     def check_for_host_failure(self):
-        """Continuously monitors if the current Host is alive."""
+        """Runs in loop. Checks if leader has timed out."""
         if not self.is_host and self.leader_id:
+            # Check last heartbeat time
             if time.time() - self.last_heartbeat > HOST_TIMEOUT:
                 self.log(f"Host {self.leader_id} timed out! Starting election...")
                 self.leader_id = None
-                if (not self.is_election_running):
+                self.state.mark_peer_offline(self.leader_id) # Mark old host offline
+                if not self.is_election_running:
                     self.start_election()
 
     def update_heartbeat(self):
         with self.lock:
             self.last_heartbeat = time.time()
-            self.state.update_uptime(int(self.last_heartbeat - self.init_time))
-            self.log(f"Updated heartbeat. Uptime: {self.state.uptime} seconds")
