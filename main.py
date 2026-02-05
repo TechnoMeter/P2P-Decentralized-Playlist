@@ -5,7 +5,8 @@ import threading
 import socket
 import random
 import pygame
-import os # Added for file check
+import os
+import hashlib
 
 try:
     import psutil
@@ -26,17 +27,31 @@ from src.utils import config
 class CollaborativeNode:
     """Main controller for the Decentralized Playlist."""
     
-    def __init__(self, node_id=None):
-        self.node_id = node_id or str(uuid.uuid4())[:8]
+    def __init__(self, display_name=None, password=None):
+        # Enforce Password
+        if not display_name or not password:
+            print("ERROR: Name and Password are required.")
+            print("Usage: python main.py [Name] [Password]")
+            sys.exit(1)
+
+        # Deterministic ID Generation:
+        # Generate a stable UUID based on Name + Password.
+        seed = f"{display_name}:{password}"
+        full_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, seed)
+        self.node_id = str(full_uuid)[:8]
+        self.display_name = display_name
+
         self.tcp_port = self._find_available_port(TCP_PORT)
         
-        self.ui = PlaylistUI(self.node_id, self.on_add_song_request)
+        # Pass Display Name to UI
+        self.ui = PlaylistUI(f"{self.display_name} [{self.node_id}]", self.on_add_song_request)
         
         self.state = StateManager(self.node_id, self.ui_log)
         self.state.current_duration = 0 
         self.history = [] 
         
-        self.network = NetworkNode(self.node_id, self.state, self.ui_log)
+        # Pass Display Name to NetworkNode
+        self.network = NetworkNode(self.node_id, self.state, self.ui_log, display_name=self.display_name)
         self.network.port = self.tcp_port
         
         self.election = ElectionManager(
@@ -48,7 +63,8 @@ class CollaborativeNode:
         )
         self.network.election = self.election 
         
-        self.discovery = DiscoveryManager(self.node_id, self.tcp_port, self.ui_log)
+        # Pass Display Name to Discovery
+        self.discovery = DiscoveryManager(self.node_id, self.tcp_port, self.ui_log, display_name=self.display_name)
         self.audio = AudioEngine(self.ui_log)
         self.network.audio = self.audio
         
@@ -59,7 +75,6 @@ class CollaborativeNode:
         
         self.simulated_battery = 100
         
-        # Wire UI Callbacks
         self.ui.on_skip_next = self.on_skip_next
         self.ui.on_skip_prev = self.on_skip_prev
         self.ui.on_play_pause = self.on_play_pause
@@ -94,7 +109,7 @@ class CollaborativeNode:
 
     def on_add_song_request(self, file_path):
         title = file_path.replace("\\", "/").split("/")[-1]
-        new_song = Song(title=title, added_by=self.node_id, file_path=file_path)
+        new_song = Song(title=title, added_by=self.display_name, file_path=file_path)
         self.state.add_song(new_song)
         self._broadcast('QUEUE_SYNC', {'song': new_song})
 
@@ -204,18 +219,21 @@ class CollaborativeNode:
             return 180.0 
 
     def _play_song_logic(self, song, start_offset=0):
-        # 1. FILE EXISTENCE CHECK (Enhanced Graceful Skip)
         if not os.path.exists(song.file_path):
             self.ui_log(f"Error: File missing locally: {song.file_path}")
             self.ui.show_notification(f"Missing File: {song.title}", is_error=True)
-            
-            # If we are host, we must skip to prevent deadlock
             if self.election.is_host:
-                self.ui_log("Host missing file. Skipping...")
-                # Recursively try next song (or just set None to let loop pick up)
-                # Setting current to None and letting loop pick is safer than recursion depth
-                self.state.current_song = None 
-                self.last_played_id = song.id # Mark as "attempted" so we don't loop
+                self.ui_log("Host missing file. Skipping to next...")
+                self.last_played_id = song.id 
+                if len(self.state.playlist) > 0:
+                    next_song = self.state.playlist.pop(0)
+                    self.state.current_song = next_song
+                    self.state.current_song_pos = 0
+                    self._play_song_logic(next_song)
+                else:
+                    self.state.current_song = None 
+                    self._broadcast('NOW_PLAYING', {'song': None}) 
+                    self.ui_log("Queue ended (last song missing).")
                 return
             
         if self.audio.play_song(song.file_path, start_time=start_offset):
@@ -234,11 +252,8 @@ class CollaborativeNode:
         self.ui.set_controls_visible(is_host, host_id=leader)
         cp = self.state.current_song
         
-        # PEER SIDE CHECK: If host says playing X, do I have X?
         if cp and not os.path.exists(cp.file_path):
             self.ui.update_now_playing(f"[MISSING] {cp.title}", cp.artist)
-            # Optional: Notify once per song
-            # if self.last_notified_missing != cp.id: ...
         else:
             self.ui.update_now_playing(cp.title if cp else None, cp.artist if cp else "Unknown")
             
@@ -261,12 +276,13 @@ class CollaborativeNode:
                 self._refresh_ui()
                 
                 if time.time() > debug_timer:
-                    print(f"\n--- [DEBUG] NETWORK STATE (My ID: {self.node_id}) ---")
+                    print(f"\n--- [DEBUG] NETWORK STATE (My ID: {self.node_id} | Name: {self.display_name}) ---")
                     print(f" > ME: Uptime={self.state.get_uptime():.1f}s | Bat={self._get_battery_level()}%")
                     if hasattr(self.state, 'lock'):
                         with self.state.lock:
                             for pid, data in self.state.peers.items():
-                                print(f" > PEER {pid}: Status={data.get('status')} | Uptime={data.get('uptime', 0):.1f}s | Bat={data.get('battery')}%")
+                                pname = data.get('display_name', 'Unknown')
+                                print(f" > PEER {pid} ({pname}): Status={data.get('status')} | Uptime={data.get('uptime', 0):.1f}s")
                     print("-----------------------------------------------------")
                     debug_timer = time.time() + 3
                 
@@ -339,6 +355,8 @@ class CollaborativeNode:
             self.network.connect_to_peer(pid, ip, port)
 
 if __name__ == "__main__":
-    cid = sys.argv[1] if len(sys.argv) > 1 else None
-    node = CollaborativeNode(cid)
+    name = sys.argv[1] if len(sys.argv) > 1 else None
+    pwd = sys.argv[2] if len(sys.argv) > 2 else None
+    
+    node = CollaborativeNode(name, pwd)
     node.start()

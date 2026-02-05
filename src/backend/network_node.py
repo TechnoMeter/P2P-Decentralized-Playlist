@@ -13,10 +13,11 @@ class NetworkNode:
     Updated: FULL_STATE_SYNC now includes peer data for persistence restoration.
     """
     
-    def __init__(self, node_id, state_manager, logger_callback=None):
+    def __init__(self, node_id, state_manager, logger_callback=None, display_name="Unknown"):
         self.node_id = str(node_id) 
         self.state = state_manager
         self.logger = logger_callback
+        self.display_name = display_name 
         self.running = True
         self.port = TCP_PORT 
         self.election = None
@@ -116,13 +117,16 @@ class NetworkNode:
         clock = self.state.vector_clock.copy()
         if msg_type in ['QUEUE_SYNC', 'FULL_STATE_SYNC', 'REMOVE_SONG', 'PLAYBACK_CONTROL']:
             clock = self.state.increment_clock()
-        msg = Message(self.node_id, self.ip, msg_type, payload, clock)
+        
+        # Attach Display Name to every message
+        msg = Message(self.node_id, self.ip, msg_type, payload, clock, display_name=self.display_name)
         try:
             data = pickle.dumps(msg)
             header = struct.pack('>I', len(data))
             self.connections[node_id].sendall(header + data)
         except:
             self.connections.pop(node_id, None)
+
 
     def _process_message(self, msg: Message):
         if str(msg.sender_id) == self.node_id: return
@@ -138,9 +142,11 @@ class NetworkNode:
     def _handle_logic(self, msg: Message):
         m_type = msg.msg_type
         sender = msg.sender_id
+        d_name = msg.display_name if msg.display_name else "Unknown"
         
         if m_type == 'HELLO':
-            self.state.update_peer(sender, msg.sender_ip, self.port)
+            # Update peer with name
+            self.state.update_peer(sender, msg.sender_ip, self.port, display_name=d_name)
             # If we are host, welcome them and trigger state sync
             if self.state.is_host(self.node_id) or not self.state.get_host():
                 self.send_to_peer(sender, 'WELCOME', payload={'host_id': self.node_id})
@@ -170,7 +176,9 @@ class NetworkNode:
             known_uptime = 0
             if sender in self.state.peers:
                 known_uptime = self.state.peers[sender].get('uptime', 0)
-            
+                            # Update name if changed
+                if d_name != "Unknown":
+                    self.state.peers[sender]['display_name'] = d_name
             # Allow some drift, but if incoming is significantly less (restart case)
             if up < known_uptime - 10.0:
                 # Keep our known high uptime (increment slightly to simulate passage of time)

@@ -60,17 +60,29 @@ class StateManager:
                 if count > self.vector_clock.get(uid, 0):
                     return False
         return True
+    
+    def _resolve_name_collision(self, node_id, raw_name):
+        """Checks if name exists for OTHER nodes and appends (1), (2) etc. locally for display."""
+        # Simple visual de-duplication. Doesn't change the remote node's actual name, just local view.
+        # However, for consistent UI, ideally the node knows its suffix. 
+        # But since we are P2P, we just accept the name they give us for now.
+        # If we want to force them to change, we'd need a NAME_CONFLICT message.
+        # Here we just store what they gave us. The conflict is handled by having unique UUIDs.
+        # If two "Bobs" exist, UI will show "Bob" and "Bob". The user can tell by IP or context.
+        # Implementing auto-numbering locally in UI is safer than changing backend state unilaterally.
+        return raw_name
 
-    def update_peer(self, node_id, ip, port):
-        """Called on discovery or HELLO. Updates connection info while PRESERVING history."""
+    def update_peer(self, node_id, ip, port, display_name="Unknown"):
+        """Called on discovery or HELLO. Updates info."""
         with self.lock:
             if node_id in self.peers:
                 # PERSISTENCE: Only update connection info and status
-                # Do NOT overwrite 'uptime' or 'battery' with defaults here!
                 self.peers[node_id]['ip'] = ip
                 self.peers[node_id]['port'] = port
                 self.peers[node_id]['status'] = 'alive'
                 self.peers[node_id]['last_seen'] = time.time()
+                if display_name != "Unknown":
+                    self.peers[node_id]['display_name'] = display_name
             else:
                 # New user -> Initialize defaults
                 self.peers[node_id] = {
@@ -79,7 +91,8 @@ class StateManager:
                     'status': 'alive', 
                     'last_seen': time.time(),
                     'uptime': 0,
-                    'battery': 100
+                    'battery': 100,
+                    'display_name': display_name
                 }
             
             if node_id not in self.vector_clock:

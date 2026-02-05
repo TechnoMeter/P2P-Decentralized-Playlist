@@ -22,6 +22,8 @@ class Message:
     payload: Any = None
     # Vector Clock for Causal Ordering
     vector_clock: Dict[str, int] = field(default_factory=dict)
+    # Visual Name (Added for UI clarity)
+    display_name: str = "Unknown"
 
     def __post_init__(self):
         if self.payload is None:

@@ -10,10 +10,9 @@ class PlaylistUI:
     and aero-styled management buttons.
     """
     
-    def __init__(self, node_id, on_add_song_callback):
-        self.node_id = node_id
+    def __init__(self, window_title, on_add_song_callback):
         self.root = tk.Tk()
-        self.root.title(f"P2P Playlist - {node_id}")
+        self.root.title(f"P2P Playlist - {window_title}")
         self.root.geometry("850x650")
         self.root.configure(bg=BG_MAIN)
         
@@ -88,7 +87,7 @@ class PlaylistUI:
         
         # Notification Label (Initially Hidden)
         self.notify_label = tk.Label(self.header, text="", bg=ACCENT_DANGER, fg="white", font=("Segoe UI", 9, "bold"), padx=10)
-        # We pack it but hide it initially? No, we pack/unpack dynamically or use place.
+        # We don't pack it yet; show_notification will pack it dynamically
         
         self.debug_btn = tk.Button(self.header, text="CMD 💻", bg=BG_HEADER, fg=TEXT_SUB,
                                  font=("Segoe UI", 9), relief="flat", activebackground=BG_PLAYER, 
@@ -240,6 +239,7 @@ class PlaylistUI:
         """Displays a temporary banner in the header for errors/status."""
         bg_color = ACCENT_DANGER if is_error else ACCENT
         self.notify_label.config(text=message, bg=bg_color)
+        # Pack after status label
         self.notify_label.pack(side="left", padx=PAD_M, after=self.status_label)
         
         # Auto-hide after 3 seconds
@@ -311,8 +311,9 @@ class PlaylistUI:
         else:
             self._check_selection_state()
         
+        # Display Name in Role Text
         if is_host:
-            role_text = f"HOST (You: {self.node_id})"
+            role_text = f"HOST (You: {self.root.title().split(' - ')[1]})"
             fg_color = TEXT_HOST
         elif host_id:
             role_text = f"LISTENER (Host: {host_id})"
