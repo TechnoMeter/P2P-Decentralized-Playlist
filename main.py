@@ -5,6 +5,7 @@ import threading
 import socket
 import random
 import pygame
+import os # Added for file check
 
 try:
     import psutil
@@ -38,7 +39,6 @@ class CollaborativeNode:
         self.network = NetworkNode(self.node_id, self.state, self.ui_log)
         self.network.port = self.tcp_port
         
-        # Pass battery callback to Election Manager
         self.election = ElectionManager(
             self.node_id, 
             self.state, 
@@ -204,6 +204,20 @@ class CollaborativeNode:
             return 180.0 
 
     def _play_song_logic(self, song, start_offset=0):
+        # 1. FILE EXISTENCE CHECK (Enhanced Graceful Skip)
+        if not os.path.exists(song.file_path):
+            self.ui_log(f"Error: File missing locally: {song.file_path}")
+            self.ui.show_notification(f"Missing File: {song.title}", is_error=True)
+            
+            # If we are host, we must skip to prevent deadlock
+            if self.election.is_host:
+                self.ui_log("Host missing file. Skipping...")
+                # Recursively try next song (or just set None to let loop pick up)
+                # Setting current to None and letting loop pick is safer than recursion depth
+                self.state.current_song = None 
+                self.last_played_id = song.id # Mark as "attempted" so we don't loop
+                return
+            
         if self.audio.play_song(song.file_path, start_time=start_offset):
             self.local_is_paused = False 
             self.last_played_id = song.id
@@ -219,24 +233,26 @@ class CollaborativeNode:
         leader = self.state.get_host()
         self.ui.set_controls_visible(is_host, host_id=leader)
         cp = self.state.current_song
-        self.ui.update_now_playing(cp.title if cp else None, cp.artist if cp else "Unknown")
+        
+        # PEER SIDE CHECK: If host says playing X, do I have X?
+        if cp and not os.path.exists(cp.file_path):
+            self.ui.update_now_playing(f"[MISSING] {cp.title}", cp.artist)
+            # Optional: Notify once per song
+            # if self.last_notified_missing != cp.id: ...
+        else:
+            self.ui.update_now_playing(cp.title if cp else None, cp.artist if cp else "Unknown")
+            
         self.ui.update_playlist(self.state.playlist)
         self.ui.update_progress(self.state.current_song_pos, getattr(self.state, 'current_duration', 0))
         self.ui.update_toggles(self.state.repeat_mode, self.is_shuffle_active)
 
     def _maintenance_loop(self):
-        # Allow a grace period for WELCOME messages to restore uptime before we start broadcasting low uptime
-        # 10s should be enough for discovery + TCP connect + Hello + Welcome
-        startup_grace_period = time.time() + 10.0 
-        
         time.sleep(2) 
         debug_timer = time.time() + 3
         while self.running:
             try:
-                # Update own uptime (relies on start_time, which Welcome message will shift back)
                 self.state.update_my_uptime()
                 
-                # Sync self in peer list for consistency so local debug logs are accurate
                 if hasattr(self.state, 'lock'):
                     with self.state.lock:
                         if self.node_id in self.state.peers:
@@ -254,49 +270,49 @@ class CollaborativeNode:
                     print("-----------------------------------------------------")
                     debug_timer = time.time() + 3
                 
-                if time.time() > startup_grace_period:
-                    if self.election.is_host:
-                        for pid in list(self.network.connections.keys()):
-                            self.network.send_to_peer(pid, 'HEARTBEAT', payload={
-                                'uptime': self.state.get_uptime(),
-                                'battery': self._get_battery_level()
-                            })
-                            self.election.update_heartbeat()
+                if self.election.is_host:
+                    for pid in list(self.network.connections.keys()):
+                        self.network.send_to_peer(pid, 'HEARTBEAT', payload={
+                            'uptime': self.state.get_uptime(),
+                            'battery': self._get_battery_level()
+                        })
+                        self.election.update_heartbeat()
 
-                        if self.audio.is_busy() or self.local_is_paused:
-                            current_pos = self.audio.get_current_pos()
-                            self.state.current_song_pos = current_pos
-                            self._broadcast('PLAYBACK_SYNC', {'pos': current_pos, 'dur': getattr(self.state, 'current_duration', 0)})
-                        else:
-                            target_song = None
-                            start_offset = 0
-                            if self.state.current_song and self.state.current_song.id != self.last_played_id:
-                                target_song = self.state.current_song
-                                start_offset = self.state.current_song_pos
-                            elif self.state.repeat_mode == 2 and self.state.current_song:
-                                target_song = self.state.current_song
-                            elif len(self.state.playlist) > 0:
-                                if self.state.repeat_mode == 1 and self.state.current_song:
-                                    self.state.playlist.append(self.state.current_song)
-                                target_song = self.state.playlist.pop(0)
-                                if self.state.current_song and self.state.current_song.id != target_song.id:
-                                    self.history.append(self.state.current_song)
-                                self.state.current_song = target_song
-                                self.state.current_song_pos = 0
-                            elif self.state.current_song is not None:
-                                self.ui_log("Playlist complete.")
-                                self.state.current_song = None
-                                self._broadcast('NOW_PLAYING', {'song': None})
-
-                            if target_song:
-                                self._play_song_logic(target_song, start_offset)
+                    if self.audio.is_busy() or self.local_is_paused:
+                        current_pos = self.audio.get_current_pos()
+                        self.state.current_song_pos = current_pos
+                        self._broadcast('PLAYBACK_SYNC', {'pos': current_pos, 'dur': getattr(self.state, 'current_duration', 0)})
                     else:
-                        host = self.state.get_host()
-                        if host and host in self.network.connections:
-                             self.network.send_to_peer(host, 'HEARTBEAT', payload={
-                                'uptime': self.state.get_uptime(),
-                                'battery': self._get_battery_level()
-                            })
+                        target_song = None
+                        start_offset = 0
+                        if self.state.current_song and self.state.current_song.id != self.last_played_id:
+                            target_song = self.state.current_song
+                            start_offset = self.state.current_song_pos
+                        elif self.state.repeat_mode == 2 and self.state.current_song:
+                            target_song = self.state.current_song
+                        elif len(self.state.playlist) > 0:
+                            if self.state.repeat_mode == 1 and self.state.current_song:
+                                self.state.playlist.append(self.state.current_song)
+                            target_song = self.state.playlist.pop(0)
+                            if self.state.current_song and self.state.current_song.id != target_song.id:
+                                self.history.append(self.state.current_song)
+                            self.state.current_song = target_song
+                            self.state.current_song_pos = 0
+                        elif self.state.current_song is not None:
+                            self.ui_log("Playlist complete.")
+                            self.state.current_song = None
+                            self._broadcast('NOW_PLAYING', {'song': None})
+
+                        if target_song:
+                            self._play_song_logic(target_song, start_offset)
+                    
+                else:
+                    host = self.state.get_host()
+                    if host and host in self.network.connections:
+                         self.network.send_to_peer(host, 'HEARTBEAT', payload={
+                            'uptime': self.state.get_uptime(),
+                            'battery': self._get_battery_level()
+                        })
 
                 self.election.check_for_host_failure()
                 time.sleep(HEARTBEAT_INTERVAL)
@@ -311,9 +327,7 @@ class CollaborativeNode:
         self.ui_log(f"Node started. ID: {self.node_id}")
         
         def delayed_election():
-            # Delay election to allow time for Welcome/Sync messages to restore uptime
-            # 10s matches the grace period to ensure we don't start election with 0 score
-            time.sleep(10.0) 
+            time.sleep(3.0) 
             self.ui_log(f"start: ELECTION (Score-Based)")
             self.election.start_election()
         threading.Thread(target=delayed_election, daemon=True).start()
