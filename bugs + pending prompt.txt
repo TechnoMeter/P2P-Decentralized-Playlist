@@ -1,0 +1,31 @@
+CURRENT BUGS IDENTIFIED (yet to fix):
+
+when a lower node is started after host promotion (for example, 5 was started first, then 6 was started, which was automatically promoted to host by bully algo and later 2 was started), the song queue list when added by the smaller nodes (5 or 2) is being persisted by the smaller follower nodes but is not reflected in the host node, the host node has only the previous history of added songs. secondly, the song being currently played is shown as "EMPTY" in the follower nodes, while the host node shows the current song being played with no issues.
+
+
+
+NEXT PROMPT AFTER BUG FIX:
+
+great job, the functionality is now perfect and now working as intended. now i want to increase the scale of my app with new features, i need you to make a really beautified ui scheme (similar to google material ui), reorganize and rearrange the ui elements in a optimal way. all these functions values must synchronized across open nodes if changed or modified, so make sure to write uniform or efficient code accordingly.
+
+my idea for you is to pin the following element so that it stays on screen no matter the size. importance can be given to other elements instead of queue ui size when scaling. i need player ui, FOR THE HOST ALONE, which includes the following functionality:
+
+player seek bar with adjustability and remaining time countdown
+
+skip next, and also enable skip to previous track (keep track list stored of previous songs)
+
+shuffle and repeat list
+
+empty or clear the entire current song queue
+
+manual selection and deletion/removal of songs present in the queue
+
+play / pause function
+
+volume bar can be added in the same pinned ui instead of separate element
+
+
+
+
+
+
