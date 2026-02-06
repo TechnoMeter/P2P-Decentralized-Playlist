@@ -385,9 +385,16 @@ class CollaborativeNode:
         
         self.ui.run()
 
-    def on_peer_discovered(self, pid, ip, port):
+def on_peer_discovered(self, pid, ip, port):
         if str(pid) != str(self.node_id):
-            self.network.connect_to_peer(pid, ip, port)
+            # Check if we are already connected
+            if self.network.connections.get(str(pid)):
+                # Connection exists (likely incoming), but we must ensure we've said HELLO
+                # so the Host knows to Welcome/Sync us.
+                self.network.send_to_peer(pid, 'HELLO', payload={'id': self.node_id})
+            else:
+                # No connection yet, establish it (sends HELLO automatically)
+                self.network.connect_to_peer(pid, ip, port)
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else None
