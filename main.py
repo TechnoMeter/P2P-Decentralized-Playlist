@@ -385,7 +385,7 @@ class CollaborativeNode:
         
         self.ui.run()
 
-def on_peer_discovered(self, pid, ip, port):
+    def on_peer_discovered(self, pid, ip, port):
         if str(pid) != str(self.node_id):
             # Check if we are already connected
             if self.network.connections.get(str(pid)):
