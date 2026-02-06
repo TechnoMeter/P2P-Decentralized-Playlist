@@ -28,14 +28,11 @@ class CollaborativeNode:
     """Main controller for the Decentralized Playlist."""
     
     def __init__(self, display_name=None, password=None):
-        # Enforce Password
         if not display_name or not password:
             print("ERROR: Name and Password are required.")
             print("Usage: python main.py [Name] [Password]")
             sys.exit(1)
 
-        # Deterministic ID Generation:
-        # Generate a stable UUID based on Name + Password.
         seed = f"{display_name}:{password}"
         full_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, seed)
         self.node_id = str(full_uuid)[:8]
@@ -43,14 +40,12 @@ class CollaborativeNode:
 
         self.tcp_port = self._find_available_port(TCP_PORT)
         
-        # Pass Display Name to UI
         self.ui = PlaylistUI(f"{self.display_name} [{self.node_id}]", self.on_add_song_request)
         
         self.state = StateManager(self.node_id, self.ui_log)
         self.state.current_duration = 0 
         self.history = [] 
         
-        # Pass Display Name to NetworkNode
         self.network = NetworkNode(self.node_id, self.state, self.ui_log, display_name=self.display_name)
         self.network.port = self.tcp_port
         
@@ -63,7 +58,6 @@ class CollaborativeNode:
         )
         self.network.election = self.election 
         
-        # Pass Display Name to Discovery
         self.discovery = DiscoveryManager(self.node_id, self.tcp_port, self.ui_log, display_name=self.display_name)
         self.audio = AudioEngine(self.ui_log)
         self.network.audio = self.audio
@@ -218,17 +212,51 @@ class CollaborativeNode:
         except:
             return 180.0 
 
+    def _resolve_local_path(self, remote_path):
+        """
+        Smart Path Resolver for Cross-Platform compatibility.
+        1. Checks exact path (works if same PC).
+        2. Checks 'assets/filename' (standard convention).
+        3. Checks current directory.
+        """
+        if not remote_path: return None
+        
+        # 1. Exact path check
+        if os.path.exists(remote_path):
+            return remote_path
+            
+        # Extract filename handling mixed separators
+        # Replace backslashes with forward slashes to split correctly on any OS
+        filename = remote_path.replace('\\', '/').split('/')[-1]
+        
+        # 2. Check local 'assets' folder
+        assets_path = os.path.join("assets", filename)
+        if os.path.exists(assets_path):
+            return assets_path
+            
+        # 3. Check current directory
+        if os.path.exists(filename):
+            return filename
+            
+        return None
+
     def _play_song_logic(self, song, start_offset=0):
-        if not os.path.exists(song.file_path):
+        # Resolve the actual file path locally
+        local_path = self._resolve_local_path(song.file_path)
+
+        if not local_path:
             self.ui_log(f"Error: File missing locally: {song.file_path}")
             self.ui.show_notification(f"Missing File: {song.title}", is_error=True)
+            
             if self.election.is_host:
                 self.ui_log("Host missing file. Skipping to next...")
                 self.last_played_id = song.id 
+                
                 if len(self.state.playlist) > 0:
                     next_song = self.state.playlist.pop(0)
                     self.state.current_song = next_song
                     self.state.current_song_pos = 0
+                    # Use recursive call to resolve path for next song too
                     self._play_song_logic(next_song)
                 else:
                     self.state.current_song = None 
@@ -236,10 +264,10 @@ class CollaborativeNode:
                     self.ui_log("Queue ended (last song missing).")
                 return
             
-        if self.audio.play_song(song.file_path, start_time=start_offset):
+        if self.audio.play_song(local_path, start_time=start_offset):
             self.local_is_paused = False 
             self.last_played_id = song.id
-            self.state.current_duration = self._get_duration(song.file_path)
+            self.state.current_duration = self._get_duration(local_path)
             self._broadcast('NOW_PLAYING', {'song': song})
             self._broadcast('PLAYBACK_SYNC', {'pos': start_offset, 'dur': self.state.current_duration})
             self._broadcast('FULL_STATE_SYNC', {'playlist': self.state.playlist, 'current_song': song})
@@ -252,10 +280,15 @@ class CollaborativeNode:
         self.ui.set_controls_visible(is_host, host_id=leader)
         cp = self.state.current_song
         
-        if cp and not os.path.exists(cp.file_path):
-            self.ui.update_now_playing(f"[MISSING] {cp.title}", cp.artist)
+        # PEER SIDE CHECK with Smart Path
+        if cp:
+            local_path = self._resolve_local_path(cp.file_path)
+            if not local_path:
+                self.ui.update_now_playing(f"[MISSING] {cp.title}", cp.artist)
+            else:
+                self.ui.update_now_playing(cp.title, cp.artist)
         else:
-            self.ui.update_now_playing(cp.title if cp else None, cp.artist if cp else "Unknown")
+            self.ui.update_now_playing("Nothing Playing", "Unknown")
             
         self.ui.update_playlist(self.state.playlist)
         self.ui.update_progress(self.state.current_song_pos, getattr(self.state, 'current_duration', 0))
@@ -276,14 +309,7 @@ class CollaborativeNode:
                 self._refresh_ui()
                 
                 if time.time() > debug_timer:
-                    print(f"\n--- [DEBUG] NETWORK STATE (My ID: {self.node_id} | Name: {self.display_name}) ---")
-                    print(f" > ME: Uptime={self.state.get_uptime():.1f}s | Bat={self._get_battery_level()}%")
-                    if hasattr(self.state, 'lock'):
-                        with self.state.lock:
-                            for pid, data in self.state.peers.items():
-                                pname = data.get('display_name', 'Unknown')
-                                print(f" > PEER {pid} ({pname}): Status={data.get('status')} | Uptime={data.get('uptime', 0):.1f}s")
-                    print("-----------------------------------------------------")
+                    # print(f"\n--- [DEBUG] ...") # Silent debug for production feel
                     debug_timer = time.time() + 3
                 
                 if self.election.is_host:
