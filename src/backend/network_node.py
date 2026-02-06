@@ -131,7 +131,7 @@ class NetworkNode:
     def _process_message(self, msg: Message):
         if str(msg.sender_id) == self.node_id: return
         
-        bypass_types = ['HELLO','WELCOME', 'HEARTBEAT', 'ELECTION', 'ANSWER', 'COORDINATOR', 'REQUEST_STATE', 'NOW_PLAYING', 'PLAYBACK_SYNC', 'REMOVE_SONG', 'QUEUE_SYNC', 'FULL_STATE_SYNC', 'PLAYBACK_CONTROL']
+        bypass_types = ['HELLO','WELCOME', 'HEARTBEAT', 'ELECTION', 'ANSWER', 'COORDINATOR', 'REQUEST_STATE', 'NOW_PLAYING', 'PLAYBACK_SYNC', 'REMOVE_SONG', 'QUEUE_SYNC', 'FULL_STATE_SYNC', 'PLAYBACK_CONTROL', 'HOST_INFO', 'PEER_LIST']
         if msg.msg_type in bypass_types or self.state.can_process(msg):
             self.state.update_clock(msg.vector_clock)
             self._handle_logic(msg)
@@ -147,14 +147,26 @@ class NetworkNode:
         if m_type == 'HELLO':
             # Update peer with name
             self.state.update_peer(sender, msg.sender_ip, self.port, display_name=d_name)
-            # If we are host, welcome them and trigger state sync
-            if self.state.is_host(self.node_id) or not self.state.get_host():
+
+            # FIX: Only the actual host should send WELCOME
+            if self.state.is_host(self.node_id):
+                # I am the host - send WELCOME and full state
                 self.send_to_peer(sender, 'WELCOME', payload={'host_id': self.node_id})
-                # Auto-send state so they get persistence data immediately
                 self.send_to_peer(sender, 'FULL_STATE_SYNC', payload={
                     'playlist': self.state.playlist,
                     'current_song': getattr(self.state, 'current_song', None),
-                    'peers': self.state.peers # SEND PEER DATA FOR PERSISTENCE
+                    'peers': self.state.peers
+                })
+            else:
+                # I am NOT the host - share host info and peer list so new node can connect
+                current_host = self.state.get_host()
+                if current_host:
+                    # Tell the new peer who the host is
+                    self.send_to_peer(sender, 'HOST_INFO', payload={'host_id': current_host})
+
+                # Share known peers so new node can discover the mesh
+                self.send_to_peer(sender, 'PEER_LIST', payload={
+                    'peers': self.state.peers
                 })
 
         elif m_type == 'WELCOME':
@@ -162,6 +174,33 @@ class NetworkNode:
             if hid: self.state.set_host(hid)
             # Request state just in case, though HELLO usually triggers it
             self.send_to_peer(sender, 'REQUEST_STATE')
+
+        elif m_type == 'HOST_INFO':
+            # Another peer is telling us who the host is
+            hid = msg.payload.get('host_id')
+            if hid and not self.state.get_host():
+                self.state.set_host(hid)
+                self.log(f"Learned host is {hid} from peer {sender}")
+                # Try to connect to the host if we're not already connected
+                if hid not in self.connections and hid != self.node_id:
+                    # We'll discover them via periodic broadcast or peer list
+
+        elif m_type == 'PEER_LIST':
+            # Another peer is sharing their known peers - helps build the mesh
+            incoming_peers = msg.payload.get('peers', {})
+            for pid, pdata in incoming_peers.items():
+                if pid != self.node_id and pid not in self.connections:
+                    # Try to connect to peers we don't know about
+                    peer_ip = pdata.get('ip')
+                    peer_port = pdata.get('port', self.port)
+                    if peer_ip and pdata.get('status') == 'alive':
+                        self.log(f"Discovered peer {pid} via peer list from {sender}")
+                        # Connect in a separate thread to avoid blocking
+                        threading.Thread(
+                            target=self.connect_to_peer,
+                            args=(pid, peer_ip, peer_port),
+                            daemon=True
+                        ).start()
 
         elif m_type == 'HEARTBEAT':
             up = msg.payload.get('uptime', 0)

@@ -7,7 +7,7 @@ from src.utils.models import Message
 
 class DiscoveryManager:
     """Handles UDP broadcasting and listening for peer discovery."""
-    
+
     def __init__(self, node_id, tcp_port, logger_callback=None, display_name="Unknown"):
         self.node_id = node_id
         self.tcp_port = tcp_port
@@ -15,6 +15,7 @@ class DiscoveryManager:
         self.logger = logger_callback
         self.running = True
         self.display_name = display_name
+        self.broadcast_interval = 5.0  # Re-broadcast every 5 seconds
 
     def log(self, text):
         if self.logger:
@@ -65,9 +66,13 @@ class DiscoveryManager:
 
     def broadcast_presence(self):
         """Broadcasts a HELLO message to the subnet."""
+        self._do_broadcast()
+
+    def _do_broadcast(self):
+        """Internal method to perform the actual broadcast."""
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            
+
             msg = Message(
                 sender_id=self.node_id,
                 sender_ip=self.local_ip,
@@ -75,13 +80,27 @@ class DiscoveryManager:
                 payload={'tcp_port': self.tcp_port},
                 display_name=self.display_name
             )
-            
+
             try:
                 s.sendto(pickle.dumps(msg), ('<broadcast>', UDP_PORT))
                 s.sendto(pickle.dumps(msg), ('127.0.0.1', UDP_PORT))
                 self.log("Broadcasted presence to network.")
             except Exception as e:
                 self.log(f"Broadcast failed: {e}")
+
+    def start_periodic_broadcast(self):
+        """Starts a background thread that periodically re-broadcasts presence."""
+        thread = threading.Thread(target=self._periodic_broadcast_loop, daemon=True)
+        thread.start()
+        self.log("Periodic broadcast started.")
+
+    def _periodic_broadcast_loop(self):
+        """Periodically broadcasts presence to help new nodes discover us."""
+        import time
+        while self.running:
+            time.sleep(self.broadcast_interval)
+            if self.running:
+                self._do_broadcast()
 
     def stop(self):
         self.running = False

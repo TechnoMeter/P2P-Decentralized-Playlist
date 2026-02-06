@@ -374,6 +374,7 @@ class CollaborativeNode:
         self.network.start_server()
         self.discovery.start_listener(self.on_peer_discovered)
         self.discovery.broadcast_presence()
+        self.discovery.start_periodic_broadcast()  # Re-broadcast periodically for new nodes
         threading.Thread(target=self._maintenance_loop, daemon=True).start()
         self.ui_log(f"Node started. ID: {self.node_id}")
         
