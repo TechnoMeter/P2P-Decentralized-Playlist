@@ -178,13 +178,16 @@ class NetworkNode:
         elif m_type == 'HOST_INFO':
             # Another peer is telling us who the host is
             hid = msg.payload.get('host_id')
-            if hid and not self.state.get_host():
-                self.state.set_host(hid)
-                self.log(f"Learned host is {hid} from peer {sender}")
-                # Try to connect to the host if we're not already connected
-                if hid not in self.connections and hid != self.node_id:
-                    # We'll discover them via periodic broadcast or peer list
-                    pass
+            if hid:
+                current_host = self.state.get_host()
+                # Accept the host info if we don't have a host, or if it differs
+                if not current_host or current_host != hid:
+                    self.state.set_host(hid)
+                    self.log(f"Learned host is {hid} from peer {sender}")
+                    # If we thought we were host but someone else is, step down
+                    if self.election and self.election.is_host and hid != self.node_id:
+                        self.election.is_host = False
+                        self.log(f"Stepping down - {hid} is the real host")
 
         elif m_type == 'PEER_LIST':
             # Another peer is sharing their known peers - helps build the mesh
@@ -276,13 +279,16 @@ class NetworkNode:
             self.log(f"Full state synced. {len(self.state.playlist)} songs.")
 
         elif m_type in ['ELECTION', 'ANSWER', 'COORDINATOR'] and self.election:
-            if m_type == 'ELECTION': 
+            if m_type == 'ELECTION':
                 self.election.on_election_received(sender, msg.payload.get('score', 0))
-            elif m_type == 'ANSWER': 
+            elif m_type == 'ANSWER':
                 self.election.on_answer_received()
-            elif m_type == 'COORDINATOR': 
-                self.election.on_coordinator_received(msg.payload['leader_id'])
-                if msg.payload['leader_id'] != self.node_id and self.audio: self.audio.stop()
+            elif m_type == 'COORDINATOR':
+                leader_id = msg.payload.get('leader_id')
+                sender_score = msg.payload.get('score')
+                self.election.on_coordinator_received(leader_id, sender_score)
+                if leader_id != self.node_id and self.audio:
+                    self.audio.stop()
         
         elif m_type == 'QUEUE_SYNC':
             song = msg.payload.get('song')

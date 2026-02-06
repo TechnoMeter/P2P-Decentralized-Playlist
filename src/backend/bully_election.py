@@ -105,17 +105,39 @@ class ElectionManager:
             self.is_election_running = False
             self.log(f"I won! Score: {self.calculate_my_score():.1f}")
             
-            # Announce to all (even offline ones in case they wake up? No, just alive)
+            # Announce to all with score for conflict resolution
+            my_score = self.calculate_my_score()
             for pid in self.network.connections.keys():
-                self.network.send_to_peer(pid, 'COORDINATOR', payload={'leader_id': self.node_id})
+                self.network.send_to_peer(pid, 'COORDINATOR', payload={
+                    'leader_id': self.node_id,
+                    'score': my_score
+                })
 
-    def on_coordinator_received(self, leader_id):
+    def on_coordinator_received(self, leader_id, sender_score=None):
         with self.lock:
+            # Conflict resolution: if we think we're host and someone else claims to be
+            if self.is_host and leader_id != self.node_id:
+                my_score = self.calculate_my_score()
+                other_score = sender_score if sender_score is not None else 0
+
+                if my_score > other_score:
+                    # I have higher score, re-assert my leadership
+                    self.log(f"Conflict: I have higher score ({my_score:.1f} > {other_score:.1f}), staying host")
+                    # Send COORDINATOR back to assert dominance
+                    self.network.send_to_peer(leader_id, 'COORDINATOR', payload={
+                        'leader_id': self.node_id,
+                        'score': my_score
+                    })
+                    return
+                else:
+                    # They have higher or equal score, step down
+                    self.log(f"Conflict: Stepping down ({my_score:.1f} <= {other_score:.1f})")
+
             self.leader_id = leader_id
             self.state.set_host(leader_id)
             self.is_host = (leader_id == self.node_id)
             self.is_election_running = False
-            self.update_heartbeat() # Reset timeout logic
+            self.update_heartbeat()
             self.log(f"New Host: {leader_id}")
 
     def on_heartbeat_received(self):

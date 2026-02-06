@@ -379,8 +379,13 @@ class CollaborativeNode:
         self.ui_log(f"Node started. ID: {self.node_id}")
         
         def delayed_election():
-            time.sleep(3.0) 
-            self.ui_log(f"start: ELECTION (Score-Based)")
+            time.sleep(3.0)
+            # Only start election if we don't already know about a host
+            existing_host = self.state.get_host()
+            if existing_host and existing_host != self.node_id:
+                self.ui_log(f"Skipping election - host {existing_host} already exists")
+                return
+            self.ui_log(f"Starting ELECTION (Score-Based)")
             self.election.start_election()
         threading.Thread(target=delayed_election, daemon=True).start()
         
