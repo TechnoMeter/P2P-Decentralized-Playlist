@@ -184,6 +184,7 @@ class NetworkNode:
                 # Try to connect to the host if we're not already connected
                 if hid not in self.connections and hid != self.node_id:
                     # We'll discover them via periodic broadcast or peer list
+                    pass
 
         elif m_type == 'PEER_LIST':
             # Another peer is sharing their known peers - helps build the mesh
