@@ -215,9 +215,11 @@ class CollaborativeNode:
     def _resolve_local_path(self, remote_path):
         """
         Smart Path Resolver for Cross-Platform compatibility.
-        1. Checks exact path (works if same PC).
-        2. Checks 'assets/filename' (standard convention).
-        3. Checks current directory.
+        1. Checks exact path.
+        2. Checks 'assets/filename'.
+        3. Checks 'assets/music/filename'.
+        4. Checks current directory.
+        5. Walks 'assets' directory to find filename.
         """
         if not remote_path: return None
         
@@ -225,18 +227,25 @@ class CollaborativeNode:
         if os.path.exists(remote_path):
             return remote_path
             
-        # Extract filename handling mixed separators
-        # Replace backslashes with forward slashes to split correctly on any OS
         filename = remote_path.replace('\\', '/').split('/')[-1]
         
-        # 2. Check local 'assets' folder
-        assets_path = os.path.join("assets", filename)
-        if os.path.exists(assets_path):
-            return assets_path
-            
-        # 3. Check current directory
-        if os.path.exists(filename):
-            return filename
+        # Define search candidates
+        candidates = [
+            os.path.join("assets", filename),
+            os.path.join("assets", "music", filename),
+            os.path.join("src", "assets", "music", filename), # In case running from root
+            filename
+        ]
+        
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+
+        # Deep search in assets folder as fallback
+        if os.path.exists("assets"):
+            for root, dirs, files in os.walk("assets"):
+                if filename in files:
+                    return os.path.join(root, filename)
             
         return None
 
